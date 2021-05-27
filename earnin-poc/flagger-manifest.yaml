@@ -1,0 +1,428 @@
+---
+# Source: base/templates/envmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: svc-troublemaker-a-env
+  namespace: flagger-demo
+data:
+  AH_CONFIGURATION_ENV: dev
+
+---
+# Source: base/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-troublemaker-a
+  namespace: flagger-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: svc-troublemaker-a
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      name: http
+
+---
+# Source: base/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: svc-troublemaker-a
+  namespace: flagger-demo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 25%
+  selector:
+    matchLabels:
+      app: svc-troublemaker-a
+  template:
+    metadata:
+      annotations:
+        iam.amazonaws.com/role: RoleTroublemakerService
+        appmesh.k8s.aws/egressIgnoredIPs: 169.254.169.254
+        appmesh.k8s.aws/egressIgnoredPorts: 22,443
+      labels:
+        app: svc-troublemaker-a
+        configurationDebug: "false"
+        scmTag: "0.0.0-sut.1609955745_git.heff56e3"
+        serviceCluster: dev
+        serviceImage: svc-troublemaker-a
+        serviceName: svc-troublemaker-a
+        serviceNamespace: default
+    spec:
+      serviceAccountName: irsa-envoy-integration
+      containers:
+        - name: svc-troublemaker-a
+          image: "artifacts.k8s.us-west-2.dev.earnin.com:8082/svc-troublemaker:0.0.0-sut.1609955745_git.heff56e3"
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /control/ready
+              port: 80
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 2
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /control/healthy
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          envFrom:
+            - configMapRef:
+                name: svc-troublemaker-a-env
+          env:
+            - name: AH_CLUSTER
+              value: dev
+            - name: AH_CONFIGURATION_DEBUG
+              value: "false"
+            - name: AH_CONFIGURATION_ENV
+              value: dev
+            - name: AH_CONFIGURATION_PATH
+              value: /etc/earnin
+            - name: AH_NAMESPACE
+              value: default
+            - name: AH_SCM_TAG
+              value: "0.0.0-sut.1609955745_git.heff56e3"
+            - name: DD_VERSION
+              value: "0.0.0-sut.1609955745_git.heff56e3"
+            - name: AH_SERVICE_NAME
+              value: svc-troublemaker-a
+            - name: ASPNETCORE_ENVIRONMENT
+              value: dev
+            - name: ASPNETCORE_URLS
+              value: http://*:80/
+            - name: AWS_DEFAULT_REGION
+              value: us-west-2
+            - name: AWS_REGION
+              value: us-west-2
+            - name: DATADOG_TRACE_ENABLED
+              value: "true"
+            - name: DD_ENV
+              value: experiment
+            - name: DD_LOGS_INJECTION
+              value: "true"
+            - name: DD_SERVICE
+              value: svc-troublemaker-a
+            - name: DD_SERVICE_NAME
+              value: svc-troublemaker-a
+            - name: DD_TRACE_AGENT_PORT
+              value: "80"
+            - name: DD_AGENT_HOST
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.hostIP
+            - name: DD_TRACE_ENABLED
+              value: "true"
+            - name: DOGSTATSD_HOST_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.hostIP
+            - name: AWS_ROLE_ARN
+              value: arn:aws:sts::429750608758:role/RoleTroublemakerService
+            - name: TROUBLEMAKER_IDENT
+              value: 'a'
+            - name: TROUBLEMAKER__SEED
+              value: "11"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200M
+            requests:
+              cpu: 100m
+              memory: 100M
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+        - name: regsecret
+
+---
+# Source: base/templates/hpa.yaml
+apiVersion: autoscaling/v2beta2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: svc-troublemaker-a-hpa
+  namespace: flagger-demo
+spec:
+  maxReplicas: 10
+  minReplicas: 2
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: svc-troublemaker-a
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # scale up if usage is above
+          # 99% of the requested CPU (100m)
+          averageUtilization: 99
+
+---
+# Source: base/templates/gatewayroute.yaml
+
+apiVersion: appmesh.k8s.aws/v1beta2
+kind: GatewayRoute
+metadata:
+  annotations:
+    moniker.spinnaker.io/application: svc-troublemaker-a
+    moniker.spinnaker.io/cluster: dev
+  name: "svc-troublemaker-a-gatewayroute"
+  namespace: flagger-demo
+spec:
+  httpRoute:
+    match:
+      prefix: /svc-troublemaker-a
+    action:
+      target:
+        virtualService:
+          virtualServiceRef:
+            name: "svc-troublemaker-a"
+
+---
+# Source: base/templates/virtualnode.yaml
+
+apiVersion: appmesh.k8s.aws/v1beta2
+kind: VirtualNode
+metadata:
+  annotations:
+    moniker.spinnaker.io/application: svc-troublemaker-a
+    moniker.spinnaker.io/cluster: dev
+  name: svc-troublemaker-a
+  namespace: flagger-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: svc-troublemaker-a
+      serviceCluster: dev
+      serviceImage: svc-troublemaker-a
+      serviceName: svc-troublemaker-a
+      serviceNamespace: default
+  listeners:
+    - portMapping:
+        port: 80
+        protocol: http
+      healthCheck:
+        protocol: http
+        path: /control/ready
+        healthyThreshold: 2
+        unhealthyThreshold: 5
+        timeoutMillis: 30000
+        intervalMillis: 10000
+      outlierDetection:
+        maxServerErrors: 30
+        interval:
+          value: 10
+          unit: s
+        baseEjectionDuration:
+          value: 30
+          unit: s
+        maxEjectionPercent: 80
+      connectionPool:
+        http:
+          maxConnections: 5
+          maxPendingRequests: 5
+  logging:
+    accessLog:
+      file:
+        path: "/dev/stdout"
+  serviceDiscovery:
+    awsCloudMap:
+      serviceName: svc-troublemaker-a
+      namespaceName: default
+
+---
+# Source: base/templates/virtualrouter.yaml
+
+apiVersion: appmesh.k8s.aws/v1beta2
+kind: VirtualRouter
+metadata:
+  annotations:
+    moniker.spinnaker.io/application: svc-troublemaker-a
+    moniker.spinnaker.io/cluster: dev
+  name: "svc-troublemaker-a"
+  namespace: flagger-demo
+spec:
+  listeners:
+    - portMapping:
+        port: 80
+        protocol: http
+  routes:
+    - name: base-route
+      priority: 901
+      httpRoute:
+        match:
+          prefix: /
+        action:
+          weightedTargets:
+            - virtualNodeRef:
+                name: svc-troublemaker-a
+              weight: 100
+        retryPolicy:
+          tcpRetryEvents:
+            - connection-error
+          httpRetryEvents:
+            - gateway-error
+            - stream-error
+          maxRetries: 6
+          perRetryTimeout:
+            value: 10000
+            unit: ms
+        timeout:
+          idle:
+            value: 70
+            unit: s
+          perRequest:
+            value: 70
+            unit: s
+
+---
+# Source: base/templates/virtualservice.yaml
+
+apiVersion: appmesh.k8s.aws/v1beta2
+kind: VirtualService
+metadata:
+  annotations:
+    moniker.spinnaker.io/application: svc-troublemaker-a
+    moniker.spinnaker.io/cluster: dev
+  name: "svc-troublemaker-a"
+  namespace: flagger-demo
+spec:
+  provider:
+    virtualRouter:
+      virtualRouterRef:
+        name: "svc-troublemaker-a"
+
+---
+
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: svc-troublemaker-a
+  namespace: flagger-demo
+spec:
+  # App Mesh API reference
+  provider: appmesh:v1beta2
+  # deployment reference
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: svc-troublemaker-a
+  # HPA reference (optional)
+  autoscalerRef:
+    apiVersion: autoscaling/v2beta2
+    kind: HorizontalPodAutoscaler
+    name: svc-troublemaker-a-hpa
+  # the maximum time in seconds for the canary deployment
+  # to make progress before it is rollback (default 600s)
+  progressDeadlineSeconds: 60
+  service:
+    # container port
+    port: 80
+    # App Mesh ingress timeout (optional)
+    timeout: 15s
+    # App Mesh retry policy (optional)
+    retries:
+      attempts: 3
+      perTryTimeout: 5s
+      retryOn: "gateway-error,stream-error"
+    # App Mesh URI settings
+    match:
+      - uri:
+          prefix: /
+    rewrite:
+      uri: /
+    serviceDiscovery:
+      awsCloudMap:
+        namespaceName: default
+        serviceName: svc-troublemaker-a
+    baseRoutePriority: 900
+  # define the canary analysis timing and KPIs
+  analysis:
+    # schedule interval (default 60s)
+    interval: 900s
+    # max number of failed metric checks before rollback
+    threshold: 5
+    # max traffic percentage routed to canary
+    # percentage (0-100)
+    maxWeight: 100
+    # canary increment step
+    # percentage (0-100)
+    stepWeight: 5
+    # App Mesh Prometheus checks
+    metrics:
+      - name: http-requests-success-rate
+        templateRef:
+          name: http-requests-success-rate
+          namespace: appmesh-system
+        # minimum req success rate (non 5xx responses)
+        # percentage (0-100)
+        thresholdRange:
+          min: 99
+        interval: 1m
+      - name: http-requests-p99-latency
+        templateRef:
+          name: http-request-p99-latency
+          namespace: appmesh-system
+        # maximum req duration P99
+        # milliseconds
+        thresholdRange:
+          max: 500
+        interval: 1m
+    # testing (optional)
+    webhooks:
+      - name: acceptance-test
+        type: pre-rollout
+        url: http://earnin-flagger-loadtester.appmesh-system/
+        timeout: 30s
+        metadata:
+          type: bash
+          cmd: "curl -s http://svc-troublemaker-a-canary.flagger-demo/control/ready"
+      - name: internal-load
+        type: pre-rollout 
+        url: http://earnin-flagger-loadtester.appmesh-system/
+        timeout: 5s
+        metadata:
+          cmd: "hey -z 5m -q 50 -c 25 http://svc-troublemaker-a-canary.flagger-demo/sample/async/1"
+      - name: internal-load
+        type: rollout
+        url: http://earnin-flagger-loadtester.appmesh-system/
+        timeout: 5s
+        metadata:
+          cmd: "hey -z 5m -q 50 -c 25 http://svc-troublemaker-a.default./sample/async/1"
+      - name: external-load
+        type: rollout
+        url: http://earnin-flagger-loadtester.appmesh-system/
+        timeout: 5s
+        metadata:
+          cmd: "hey -z 5m -q 50 -c 25 http://a87ef8a3b61b1448cbc3e433c0e22def-d8d9d9f0469de670.elb.us-west-2.amazonaws.com/svc-troublemaker-a/sample/async/1"
